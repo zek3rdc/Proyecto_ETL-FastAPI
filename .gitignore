@@ -1,0 +1,14 @@
+# Directorios y archivos generados
+temp_uploads/
+logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+*.log
+*.sqlite3
+venv/
+env/
+
+# Archivos de configuración sensibles
+.env.example

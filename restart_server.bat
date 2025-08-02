@@ -1,0 +1,6 @@
+@echo off
+echo Reiniciando servidor ETL...
+taskkill /f /im python.exe 2>nul
+timeout /t 2 /nobreak >nul
+echo Iniciando servidor ETL con logs detallados...
+python main.py
