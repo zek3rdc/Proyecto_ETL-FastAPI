@@ -12,3 +12,13 @@ env/
 
 # Archivos de configuración sensibles
 .env.example
+
+# Archivos de Office, Excel, CSV, TXT
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.csv
+*.txt
