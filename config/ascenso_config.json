@@ -1,0 +1,89 @@
+{
+  "niveles_academicos": {
+    "BACHILLER": 1,
+    "T.S.U": 2,
+    "LICENCIATURA": 3,
+    "ESPECIALIZACIÓN": 4,
+    "MAGISTER": 5,
+    "DOCTORADO": 6,
+    "POSDOCTORADO": 7,
+    "Diplomado en Alta Gerencia": 8
+  },
+  "rangos": [
+    "AGENTE",
+    "OFICIAL", 
+    "PRIMER OFICIAL",
+    "OFICIAL JEFE",
+    "INSPECTOR",
+    "PRIMER INSPECTOR",
+    "INSPECTOR JEFE",
+    "COMISARIO",
+    "PRIMER COMISARIO",
+    "COMISARIO JEFE",
+    "COMISARIO GENERAL",
+    "COMISARIO MAYOR",
+    "COMISARIO SUPERIOR"
+  ],
+  "criterios_ascenso": {
+    "AGENTE": {
+      "siguienteRango": "OFICIAL",
+      "tiempoRango": 2,
+      "antiguedad": 2,
+      "nivelAcademico": "BACHILLER"
+    },
+    "OFICIAL": {
+      "siguienteRango": "PRIMER OFICIAL",
+      "tiempoRango": 4,
+      "antiguedad": 4,
+      "nivelAcademico": "T.S.U"
+    },
+    "PRIMER OFICIAL": {
+      "siguienteRango": "OFICIAL JEFE",
+      "tiempoRango": 3,
+      "antiguedad": 7,
+      "nivelAcademico": "LICENCIATURA"
+    },
+    "OFICIAL JEFE": {
+      "siguienteRango": "INSPECTOR",
+      "tiempoRango": 3,
+      "antiguedad": 10,
+      "nivelAcademico": "LICENCIATURA"
+    },
+    "INSPECTOR": {
+      "siguienteRango": "PRIMER INSPECTOR",
+      "tiempoRango": 3,
+      "antiguedad": 13,
+      "nivelAcademico": "ESPECIALIZACIÓN"
+    },
+    "PRIMER INSPECTOR": {
+      "siguienteRango": "INSPECTOR JEFE",
+      "tiempoRango": 4,
+      "antiguedad": 17,
+      "nivelAcademico": "MAGISTER"
+    },
+    "INSPECTOR JEFE": {
+      "siguienteRango": "COMISARIO",
+      "tiempoRango": 3,
+      "antiguedad": 20,
+      "nivelAcademico": "DOCTORADO"
+    },
+    "COMISARIO": {
+      "siguienteRango": "PRIMER COMISARIO",
+      "tiempoRango": 4,
+      "antiguedad": 25,
+      "nivelAcademico": "DOCTORADO"
+    },
+    "PRIMER COMISARIO": {
+      "siguienteRango": "COMISARIO JEFE",
+      "tiempoRango": 5,
+      "antiguedad": 30,
+      "nivelAcademico": "POSDOCTORADO"
+    },
+    "COMISARIO JEFE": {
+      "siguienteRango": null,
+      "tiempoRango": null,
+      "antiguedad": null,
+      "nivelAcademico": null
+    }
+  }
+}

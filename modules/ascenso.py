@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from datetime import datetime, date
@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 import math
+import os
 
 # Configuración de logging
 logger = logging.getLogger(__name__)
@@ -28,89 +29,45 @@ BATCH_SIZE = 3000  # Lotes de 3000 registros
 
 router = APIRouter()
 
-# Definición de rangos (jerarquía académica)
-NIVELES_ACADEMICOS = {
-    'BACHILLER': 1,
-    'T.S.U': 2,
-    'LICENCIATURA': 3,
-    'ESPECIALIZACIÓN': 4,
-    'MAGISTER': 5,
-    'DOCTORADO': 6,
-    'POSDOCTORADO': 7,
-    'Diplomado en Alta Gerencia': 8
-}
+# Cargar configuración desde JSON
+def cargar_configuracion_ascenso():
+    """Carga la configuración de ascenso desde el archivo JSON"""
+    try:
+        config_path = Path(__file__).parent.parent / "config" / "ascenso_config.json"
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return config
+    except Exception as e:
+        logger.error(f"Error cargando configuración de ascenso: {e}")
+        # Configuración por defecto en caso de error
+        return {
+            "niveles_academicos": {
+                'BACHILLER': 1,
+                'T.S.U': 2,
+                'LICENCIATURA': 3,
+                'ESPECIALIZACIÓN': 4,
+                'MAGISTER': 5,
+                'DOCTORADO': 6,
+                'POSDOCTORADO': 7,
+                'Diplomado en Alta Gerencia': 8
+            },
+            "rangos": [
+                'AGENTE', 'OFICIAL', 'PRIMER OFICIAL', 'OFICIAL JEFE', 
+                'INSPECTOR', 'PRIMER INSPECTOR', 'INSPECTOR JEFE', 
+                'COMISARIO', 'PRIMER COMISARIO', 'COMISARIO JEFE', 
+                'COMISARIO GENERAL', 'COMISARIO MAYOR', 'COMISARIO SUPERIOR'
+            ],
+            "criterios_ascenso": {}
+        }
 
-# Rangos policiales
-RANGOS = [
-    'AGENTE', 'OFICIAL', 'PRIMER OFICIAL', 'OFICIAL JEFE', 
-    'INSPECTOR', 'PRIMER INSPECTOR', 'INSPECTOR JEFE', 
-    'COMISARIO', 'PRIMER COMISARIO', 'COMISARIO JEFE', 
-    'COMISARIO GENERAL', 'COMISARIO MAYOR', 'COMISARIO SUPERIOR'
-]
+# Cargar configuración al inicializar el módulo
+CONFIG_ASCENSO = cargar_configuracion_ascenso()
+NIVELES_ACADEMICOS = CONFIG_ASCENSO["niveles_academicos"]
+RANGOS = CONFIG_ASCENSO["rangos"]
+CRITERIOS_ASCENSO = CONFIG_ASCENSO["criterios_ascenso"]
 
-# Criterios de ascenso
-CRITERIOS_ASCENSO = {
-    'AGENTE': {
-        'siguienteRango': 'OFICIAL',
-        'tiempoRango': 2,
-        'antiguedad': 2,
-        'nivelAcademico': 'BACHILLER'
-    },
-    'OFICIAL': {
-        'siguienteRango': 'PRIMER OFICIAL',
-        'tiempoRango': 4,
-        'antiguedad': 4,
-        'nivelAcademico': 'T.S.U'
-    },
-    'PRIMER OFICIAL': {
-        'siguienteRango': 'OFICIAL JEFE',
-        'tiempoRango': 3,
-        'antiguedad': 7,
-        'nivelAcademico': 'LICENCIATURA'
-    },
-    'OFICIAL JEFE': {
-        'siguienteRango': 'INSPECTOR',
-        'tiempoRango': 3,
-        'antiguedad': 10,
-        'nivelAcademico': 'LICENCIATURA'
-    },
-    'INSPECTOR': {
-        'siguienteRango': 'PRIMER INSPECTOR',
-        'tiempoRango': 3,
-        'antiguedad': 13,
-        'nivelAcademico': 'ESPECIALIZACIÓN'
-    },
-    'PRIMER INSPECTOR': {
-        'siguienteRango': 'INSPECTOR JEFE',
-        'tiempoRango': 4,
-        'antiguedad': 17,
-        'nivelAcademico': 'MAGISTER'
-    },
-    'INSPECTOR JEFE': {
-        'siguienteRango': 'COMISARIO',
-        'tiempoRango': 3,
-        'antiguedad': 20,
-        'nivelAcademico': 'DOCTORADO'
-    },
-    'COMISARIO': {
-        'siguienteRango': 'PRIMER COMISARIO',
-        'tiempoRango': 4,
-        'antiguedad': 25,
-        'nivelAcademico': 'DOCTORADO'
-    },
-    'PRIMER COMISARIO': {
-        'siguienteRango': 'COMISARIO JEFE',
-        'tiempoRango': 5,
-        'antiguedad': 30,
-        'nivelAcademico': 'POSDOCTORADO'
-    },
-    'COMISARIO JEFE': {
-        'siguienteRango': None,
-        'tiempoRango': None,
-        'antiguedad': None,
-        'nivelAcademico': None
-    }
-}
+# Directorio base para las fotos de funcionarios
+FOTOS_BASE_DIR = Path("C:/Users/jozek/Documents/Proyectos/java/jupe/jupe/storage/app/public/fotos_funcionarios/")
 
 # Modelos Pydantic
 class FuncionarioAscenso(BaseModel):
@@ -184,36 +141,83 @@ def calcular_edad(fecha_nacimiento: date, fecha_corte: date) -> int:
     return edad
 
 def calcular_tiempo_servicio(fecha_ingreso: date, fecha_corte: date, tiempos_adicionales: List[Dict]) -> float:
-    """Calcula el tiempo total de servicio en años"""
+    """Calcula el tiempo total de servicio en años - CORREGIDO para usar la misma lógica que calcular_antiguedad_policial"""
     if not fecha_ingreso:
         return 0.0
     
-    # Tiempo base desde fecha de ingreso
-    tiempo_base = (fecha_corte - fecha_ingreso).days / 365.25
-    
-    # Tiempo adicional de servicios previos
-    tiempo_adicional = 0.0
-    for tiempo in tiempos_adicionales:
-        if tiempo.get('fecha_ingreso') and tiempo.get('fecha_egreso'):
-            try:
-                fecha_inicio = datetime.strptime(str(tiempo['fecha_ingreso']), '%Y-%m-%d').date()
-                fecha_fin = datetime.strptime(str(tiempo['fecha_egreso']), '%Y-%m-%d').date()
-                
-                # Solo contar si es anterior al ingreso actual o posterior a la fecha actual
-                if fecha_inicio < fecha_ingreso or fecha_fin > fecha_corte:
-                    tiempo_adicional += (fecha_fin - fecha_inicio).days / 365.25
-            except (ValueError, TypeError):
-                continue
-    
-    return tiempo_base + tiempo_adicional
+    try:
+        # Tiempo base desde fecha de ingreso CPNB
+        dias_cpnb = (fecha_corte - fecha_ingreso).days
+        
+        # Tiempo adicional de servicios previos (CORREGIDO: sumar TODOS los tiempos adicionales)
+        dias_adicionales = 0
+        for tiempo in tiempos_adicionales:
+            if tiempo.get('fecha_ingreso') and tiempo.get('fecha_egreso'):
+                try:
+                    fecha_inicio = datetime.strptime(str(tiempo['fecha_ingreso']), '%Y-%m-%d').date()
+                    fecha_fin = datetime.strptime(str(tiempo['fecha_egreso']), '%Y-%m-%d').date()
+                    # CORREGIDO: Sumar TODOS los períodos de servicio adicional sin restricciones
+                    dias_adicionales += (fecha_fin - fecha_inicio).days
+                except (ValueError, TypeError):
+                    continue
+        
+        # Total de días combinados
+        total_dias = dias_cpnb + dias_adicionales
+        
+        # Convertir a años (usando la misma lógica que calcular_antiguedad_policial)
+        return total_dias / 365.25
+        
+    except Exception as e:
+        logger.error(f"Error calculando tiempo de servicio: {e}")
+        return 0.0
 
-def calcular_tiempo_en_rango(fecha_ultimo_ascenso: date, fecha_ingreso: date, fecha_corte: date) -> float:
-    """Calcula el tiempo en el rango actual en años"""
-    if fecha_ultimo_ascenso:
-        return (fecha_corte - fecha_ultimo_ascenso).days / 365.25
-    elif fecha_ingreso:
-        return (fecha_corte - fecha_ingreso).days / 365.25
-    else:
+def calcular_tiempo_en_rango(fecha_ultimo_ascenso: date, fecha_ingreso: date, fecha_corte: date, historial_ascensos: List[Dict] = None) -> float:
+    """
+    Calcula el tiempo en el rango actual en años.
+    La prioridad de fechas es:
+    1. La fecha más reciente del historial de ascensos.
+    2. La fecha de último ascenso del funcionario.
+    3. La fecha de ingreso del funcionario.
+    """
+    try:
+        fecha_referencia = None
+        
+        # 1. Prioridad: Historial de Ascensos
+        if historial_ascensos:
+            fechas_historial = []
+            for ascenso in historial_ascensos:
+                fecha = ascenso.get('fecha_ascenso')
+                if not fecha:
+                    continue
+                
+                if isinstance(fecha, str):
+                    try:
+                        fecha_dt = datetime.strptime(fecha, '%Y-%m-%d').date()
+                        fechas_historial.append(fecha_dt)
+                    except (ValueError, TypeError):
+                        continue
+                elif isinstance(fecha, date):
+                    fechas_historial.append(fecha)
+
+            if fechas_historial:
+                fecha_referencia = max(fechas_historial)
+
+        # 2. Prioridad: Fecha de último ascenso del funcionario (si no se encontró en el historial)
+        if not fecha_referencia or fecha_referencia == date(1900, 1, 1):
+            fecha_referencia = fecha_ultimo_ascenso
+
+        # 3. Prioridad: Fecha de ingreso (si ninguna de las anteriores es válida)
+        if not fecha_referencia or fecha_referencia == date(1900, 1, 1):
+             fecha_referencia = fecha_ingreso
+
+        # Calcular el tiempo si tenemos una fecha de referencia válida
+        if fecha_referencia and fecha_referencia != date(1900, 1, 1):
+            return (fecha_corte - fecha_referencia).days / 365.25
+        
+        return 0.0
+        
+    except Exception as e:
+        logger.error(f"Error calculando tiempo en rango: {e}")
         return 0.0
 
 def obtener_nivel_academico_maximo(antecedentes_academicos: List[Dict]) -> str:
@@ -295,16 +299,8 @@ def obtener_funcionarios_para_ascenso(fecha_corte: date) -> List[Dict]:
             f.nombre_completo,
             f.sexo,
             f.fecha_nacimiento,
-            -- Fecha ingreso máxima entre funcionarios y tiempos_servicio
-            GREATEST(
-                COALESCE(f.fecha_ingreso, '1900-01-01'),
-                COALESCE(MAX(ts.fecha_ingreso::date), '1900-01-01')
-            ) as fecha_ingreso,
-            -- Fecha último ascenso máxima entre funcionarios y historial_ascensos
-            GREATEST(
-                COALESCE(f.fecha_ultimo_ascenso, '1900-01-01'),
-                COALESCE(MAX(ha.fecha_ascenso), '1900-01-01')
-            ) as fecha_ultimo_ascenso,
+            f.fecha_ingreso,
+            f.fecha_ultimo_ascenso,
             f.rango_actual,
             f.status,
             f.condicion_actual,
@@ -377,7 +373,7 @@ def obtener_funcionarios_para_ascenso(fecha_corte: date) -> List[Dict]:
             AND UPPER(COALESCE(f.condicion_actual, '')) NOT IN ('SOLICITADO', 'DESTITUIDO', 'PRIVADO DE LIBERTAD')
             AND f.rango_actual IS NOT NULL
             AND f.rango_actual != ''
-        GROUP BY f.id, f.fecha_ingreso, f.fecha_ultimo_ascenso
+        GROUP BY f.id
         ORDER BY f.cedula
         """
         
@@ -433,8 +429,13 @@ def procesar_funcionario_para_ascenso(funcionario_data: Dict, fecha_corte: date)
         tiempos_servicio = json.loads(tiempos_servicio)
     tiempo_de_servicio = calcular_tiempo_servicio(fecha_ingreso, fecha_corte, tiempos_servicio)
     
-    # Calcular tiempo en rango
-    tiempo_en_rango = calcular_tiempo_en_rango(fecha_ultimo_ascenso, fecha_ingreso, fecha_corte)
+    # Procesar historial de ascensos
+    historial_ascensos = funcionario_data.get('historial_ascensos', [])
+    if isinstance(historial_ascensos, str):
+        historial_ascensos = json.loads(historial_ascensos)
+    
+    # Calcular tiempo en rango usando el historial de ascensos
+    tiempo_en_rango = calcular_tiempo_en_rango(fecha_ultimo_ascenso, fecha_ingreso, fecha_corte, historial_ascensos)
     
     # Procesar expedientes
     expedientes = funcionario_data.get('expedientes', [])
@@ -559,180 +560,836 @@ def procesar_funcionario_para_ascenso(funcionario_data: Dict, fecha_corte: date)
         expedientes_data=expedientes
     )
 
+def calcular_orden_merito_completo(funcionario: FuncionarioAscenso) -> tuple:
+    """
+    Calcula una tupla de criterios para ordenar funcionarios por mérito completo.
+    Retorna tupla con criterios ordenados por prioridad (mayor valor = mejor posición).
+    """
+    # 1. Tiempo de servicio (años) - Criterio principal
+    tiempo_servicio = funcionario.tiempo_de_servicio
+    
+    # 2. Nivel académico (valor numérico) - Criterio secundario
+    nivel_academico_valor = NIVELES_ACADEMICOS.get(funcionario.nivel_academico, 0)
+    
+    # 3. Tiempo en rango (años) - Criterio terciario
+    tiempo_rango = funcionario.tiempo_en_rango
+    
+    # 4. Puntos de mérito totales - Criterio cuaternario
+    puntos_merito = funcionario.total_puntos
+    
+    # 5. Edad (como desempate final, menor edad = mejor)
+    edad_desempate = -(funcionario.edad or 0)  # Negativo para que menor edad tenga mayor valor
+    
+    return (tiempo_servicio, nivel_academico_valor, tiempo_rango, puntos_merito, edad_desempate)
+
 def organizar_listas_ascenso(funcionarios_procesados: List[FuncionarioAscenso]) -> Dict[str, List[FuncionarioAscenso]]:
-    """Organiza los funcionarios en las diferentes listas según los criterios"""
+    """Organiza los funcionarios en las diferentes listas según los criterios de mérito"""
     
     listas = {
         "cumple_todos_requisitos": [],
-        "cumple_menos_academicos": [],
+        "falta_nivel_academico": [],
+        "falta_tiempo_rango": [],
+        "falta_tiempo_servicio": [],
         "expediente_cerrado_reciente": [],
         "expediente_abierto": [],
         "condicion_actual_invalida": []
     }
     
     for funcionario in funcionarios_procesados:
-        # Primera prioridad: Cumple todos los requisitos
+        # Verificar condición actual inválida primero (descalifica completamente)
+        if funcionario.condicion_actual_invalida:
+            listas["condicion_actual_invalida"].append(funcionario)
+            continue
+            
+        # Verificar expedientes que descalifican
+        if funcionario.tiene_expediente_abierto:
+            listas["expediente_abierto"].append(funcionario)
+            continue
+            
+        if funcionario.tiene_expediente_cerrado_reciente:
+            listas["expediente_cerrado_reciente"].append(funcionario)
+            continue
+        
+        # Ahora clasificar por requisitos faltantes (orden de mérito)
+        
+        # 1. Primera prioridad: Cumple todos los requisitos
         if funcionario.cumple_todos_requisitos:
             listas["cumple_todos_requisitos"].append(funcionario)
         
-        # Segunda prioridad: Cumple todos menos académicos
+        # 2. Segunda prioridad: Solo falta nivel académico
         elif funcionario.cumple_requisitos_menos_academicos:
-            listas["cumple_menos_academicos"].append(funcionario)
+            listas["falta_nivel_academico"].append(funcionario)
         
-        # Tercera prioridad: Expediente cerrado reciente
-        elif funcionario.tiene_expediente_cerrado_reciente:
-            listas["expediente_cerrado_reciente"].append(funcionario)
-        
-        # Cuarta prioridad: Expediente abierto
-        elif funcionario.tiene_expediente_abierto:
-            listas["expediente_abierto"].append(funcionario)
-        
-        # Quinta prioridad: Condición actual inválida
-        elif funcionario.condicion_actual_invalida:
-            listas["condicion_actual_invalida"].append(funcionario)
-        
-        # Si no cumple ninguna categoría específica, va a expediente cerrado
+        # 3-4. Determinar si falta tiempo en rango o tiempo de servicio
         else:
-            listas["expediente_cerrado_reciente"].append(funcionario)
+            # Obtener criterios para determinar qué falta específicamente
+            rango_normalizado = normalizar_rango(funcionario.rango_actual)
+            criterios = CRITERIOS_ASCENSO.get(rango_normalizado, {})
+            tiempo_requerido_rango = criterios.get('tiempoRango') or 0
+            antiguedad_requerida = criterios.get('antiguedad') or 0
+            
+            cumple_tiempo_rango = funcionario.tiempo_en_rango >= tiempo_requerido_rango
+            cumple_antiguedad = funcionario.tiempo_de_servicio >= antiguedad_requerida
+            
+            # 3. Tercera prioridad: Solo falta tiempo en rango
+            if cumple_antiguedad and not cumple_tiempo_rango:
+                listas["falta_tiempo_rango"].append(funcionario)
+            
+            # 4. Cuarta prioridad: Falta tiempo de servicio (con o sin tiempo en rango)
+            elif not cumple_antiguedad:
+                listas["falta_tiempo_servicio"].append(funcionario)
+            
+            # Caso por defecto (no debería llegar aquí, pero por seguridad)
+            else:
+                listas["falta_tiempo_servicio"].append(funcionario)
     
-    # Ordenar cada lista por puntos de mérito (descendente)
+    # Ordenar cada lista por orden de mérito completo (múltiples criterios)
+    logger.info("Aplicando ordenamiento por mérito completo a cada categoría...")
+    
     for lista_nombre in listas:
-        listas[lista_nombre].sort(key=lambda x: x.total_puntos, reverse=True)
+        if listas[lista_nombre]:  # Solo ordenar si hay funcionarios
+            # Ordenar por criterios múltiples: tiempo servicio, nivel académico, tiempo rango, puntos, edad
+            listas[lista_nombre].sort(key=calcular_orden_merito_completo, reverse=True)
+            
+            # Log para verificar el orden
+            logger.info(f"Categoría '{lista_nombre}': {len(listas[lista_nombre])} funcionarios ordenados por mérito")
+            if len(listas[lista_nombre]) > 0:
+                primer_funcionario = listas[lista_nombre][0]
+                logger.debug(f"  Primer funcionario: {primer_funcionario.nombre_completo} - "
+                           f"Servicio: {primer_funcionario.tiempo_de_servicio:.1f}años, "
+                           f"Académico: {primer_funcionario.nivel_academico}, "
+                           f"Rango: {primer_funcionario.tiempo_en_rango:.1f}años, "
+                           f"Puntos: {primer_funcionario.total_puntos}")
     
     return listas
 
-def generar_excel_ascensos(listas: Dict[str, List[FuncionarioAscenso]], fecha_corte: date) -> str:
-    """Genera un archivo Excel con las listas de ascenso"""
+def obtener_datos_funcionario_completos(funcionario_id: int) -> Dict:
+    """Obtiene todos los datos completos de un funcionario para el listado de ascenso"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Query completa para obtener todos los datos necesarios
+        query = """
+        SELECT 
+            f.id,
+            f.cedula,
+            f.nombre_completo,
+            f.sexo,
+            f.fecha_nacimiento,
+            f.fecha_ingreso,
+            f.fecha_ultimo_ascenso,
+            f.rango_actual,
+            f.status,
+            f.condicion_actual,
+            f.tipo,
+            f.grado_instruccion,
+            f.nro_local,
+            f.nro_celular,
+            f.nro_otro,
+            f.cohorte,
+            f.imagen,
+            f.dependencia as dependencia_texto,
+            
+            -- Dependencia con prioridad (pivot sobre funcionario)
+            COALESCE(
+                (SELECT d.nombre 
+                 FROM funcionario_dependencia fd 
+                 JOIN dependencias d ON fd.id_dependencia = d.id_dependencia 
+                 WHERE fd.id_funcionario = f.id 
+                 ORDER BY fd.created_at DESC 
+                 LIMIT 1),
+                f.dependencia,
+                'No posee'
+            ) as dependencia_final,
+            
+            -- Rango actual con prioridad (historial sobre funcionario)
+            COALESCE(
+                (SELECT ha.rango_nuevo 
+                 FROM historial_ascensos ha 
+                 WHERE ha.funcionario_id = f.id 
+                 ORDER BY ha.fecha_ascenso DESC 
+                 LIMIT 1),
+                f.rango_actual
+            ) as rango_final,
+            
+            -- Fecha último ascenso con prioridad (historial sobre funcionario)
+            COALESCE(
+                (SELECT ha.fecha_ascenso 
+                 FROM historial_ascensos ha 
+                 WHERE ha.funcionario_id = f.id 
+                 ORDER BY ha.fecha_ascenso DESC 
+                 LIMIT 1),
+                f.fecha_ultimo_ascenso
+            ) as fecha_ultimo_ascenso_final,
+            
+            -- Nivel académico con prioridad (antecedentes sobre funcionario)
+            COALESCE(
+                (SELECT aa.grado_instruccion 
+                 FROM antecedentes_academicos aa 
+                 WHERE aa.funcionario_id = f.id 
+                 ORDER BY aa.fecha_graduacion DESC 
+                 LIMIT 1),
+                f.grado_instruccion
+            ) as nivel_academico_final,
+            
+            -- Observaciones del último ascenso
+            (SELECT ha.observaciones 
+             FROM historial_ascensos ha 
+             WHERE ha.funcionario_id = f.id 
+             ORDER BY ha.fecha_ascenso DESC 
+             LIMIT 1) as observaciones_ascenso,
+            
+            -- Tiempo de servicio adicional
+            COALESCE(
+                json_agg(
+                    DISTINCT jsonb_build_object(
+                        'institucion', ts.institucion,
+                        'fecha_ingreso', ts.fecha_ingreso,
+                        'fecha_egreso', ts.fecha_egreso,
+                        'cargo', ts.cargo
+                    )
+                ) FILTER (WHERE ts.id IS NOT NULL), 
+                '[]'::json
+            ) as tiempos_servicio
+            
+        FROM funcionarios f
+        LEFT JOIN tiempo_servicio ts ON f.id = ts.funcionario_id
+        WHERE f.id = %s
+        GROUP BY f.id
+        """
+        
+        cursor.execute(query, (funcionario_id,))
+        funcionario_data = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        return dict(funcionario_data) if funcionario_data else {}
+        
+    except Exception as e:
+        # Solo loggear errores críticos, no errores de datos faltantes
+        if "no existe la columna" not in str(e).lower() and "does not exist" not in str(e).lower():
+            logger.error(f"Error obteniendo datos completos del funcionario {funcionario_id}: {e}")
+        return {}
+
+def calcular_antiguedad_policial(fecha_ingreso: date, tiempos_servicio: List[Dict], fecha_corte: date) -> str:
+    """Calcula la antigüedad total en la función policial como en show.blade.php"""
+    if not fecha_ingreso:
+        return "0 años, 0 meses, 0 días"
     
     try:
-        # Crear un buffer en memoria para el archivo Excel
-        output = io.BytesIO()
+        # Tiempo base desde fecha de ingreso CPNB
+        dias_cpnb = (fecha_corte - fecha_ingreso).days
         
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Tiempo adicional de servicios previos
+        dias_adicionales = 0
+        for tiempo in tiempos_servicio:
+            if tiempo.get('fecha_ingreso') and tiempo.get('fecha_egreso'):
+                try:
+                    fecha_inicio = datetime.strptime(str(tiempo['fecha_ingreso']), '%Y-%m-%d').date()
+                    fecha_fin = datetime.strptime(str(tiempo['fecha_egreso']), '%Y-%m-%d').date()
+                    dias_adicionales += (fecha_fin - fecha_inicio).days
+                except (ValueError, TypeError):
+                    continue
+        
+        # Total de días combinados
+        total_dias = dias_cpnb + dias_adicionales
+        
+        # Convertir a años, meses y días
+        total_anos = total_dias // 365
+        dias_restantes = total_dias % 365
+        total_meses = dias_restantes // 30
+        dias_finales = dias_restantes % 30
+        
+        return f"{total_anos} años, {total_meses} meses, {dias_finales} días"
+        
+    except Exception as e:
+        logger.error(f"Error calculando antigüedad policial: {e}")
+        return "Error en cálculo"
+
+def procesar_lote_funcionarios_excel(lote_funcionarios: List[FuncionarioAscenso], fecha_corte: date, lote_id: int) -> List[Dict]:
+    """Procesa un lote de funcionarios para Excel en un hilo separado"""
+    start_time = time.time()
+    filas_procesadas = []
+    
+    logger.info(f"[EXCEL_LOTE_{lote_id}] Iniciando procesamiento de {len(lote_funcionarios)} funcionarios")
+    
+    # Obtener conexión a la base de datos para este hilo
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Preparar query optimizada para obtener datos de múltiples funcionarios
+        funcionario_ids = [f.id for f in lote_funcionarios]
+        placeholders = ','.join(['%s'] * len(funcionario_ids))
+        
+        query = f"""
+        SELECT 
+            f.id,
+            f.cedula,
+            f.nombre_completo,
+            f.sexo,
+            f.fecha_nacimiento,
+            f.fecha_ingreso,
+            f.fecha_ultimo_ascenso,
+            f.rango_actual,
+            f.status,
+            f.condicion_actual,
+            f.tipo,
+            f.grado_instruccion,
+            f.nro_local,
+            f.nro_celular,
+            f.nro_otro,
+            f.cohorte,
+            f.imagen,
+            f.dependencia as dependencia_texto,
             
-            # Hoja 1: Todos los funcionarios organizados por categorías
-            datos_completos = []
+            -- Dependencia con prioridad
+            COALESCE(
+                (SELECT d.nombre 
+                 FROM funcionario_dependencia fd 
+                 JOIN dependencias d ON fd.id_dependencia = d.id_dependencia 
+                 WHERE fd.id_funcionario = f.id 
+                 ORDER BY fd.created_at DESC 
+                 LIMIT 1),
+                f.dependencia,
+                'No posee'
+            ) as dependencia_final,
             
-            for categoria, funcionarios in listas.items():
-                for funcionario in funcionarios:
-                    datos_completos.append({
-                        'Categoría': categoria.replace('_', ' ').title(),
-                        'Cédula': funcionario.cedula,
-                        'Nombre Completo': funcionario.nombre_completo,
-                        'Sexo': funcionario.sexo,
-                        'Edad': funcionario.edad,
-                        'Nivel Académico': funcionario.nivel_academico,
-                        'Tiempo en Rango (años)': funcionario.tiempo_en_rango,
-                        'Tiempo de Servicio (años)': funcionario.tiempo_de_servicio,
-                        'Total Puntos': funcionario.total_puntos,
-                        'Estado Actual': funcionario.estado_actual,
-                        'Expedientes': funcionario.expedientes,
-                        'Rango Actual': funcionario.rango_actual,
-                        'Rango a Aplicar': funcionario.rango_a_aplicar,
-                        'Detalles Expedientes Cerrados Recientes': funcionario.detalles_expedientes_cerrados_recientes,
-                        'Detalles Expedientes Abiertos': funcionario.detalles_expedientes_abiertos,
-                        'Observaciones': funcionario.observaciones
-                    })
+            -- Rango actual con prioridad
+            COALESCE(
+                (SELECT ha.rango_nuevo 
+                 FROM historial_ascensos ha 
+                 WHERE ha.funcionario_id = f.id 
+                 ORDER BY ha.fecha_ascenso DESC 
+                 LIMIT 1),
+                f.rango_actual
+            ) as rango_final,
             
-            if datos_completos:
-                df_completo = pd.DataFrame(datos_completos)
-                df_completo.to_excel(writer, sheet_name='Listado Completo', index=False)
-                
-                # Agregar autofiltro y ajustar ancho columnas
-                worksheet = writer.sheets['Listado Completo']
-                worksheet.auto_filter.ref = worksheet.dimensions
-                for col_cells in worksheet.columns:
-                    max_length = 0
-                    column = col_cells[0].column_letter
-                    for cell in col_cells:
-                        try:
-                            if cell.value:
-                                max_length = max(max_length, len(str(cell.value)))
-                        except:
-                            pass
-                    adjusted_width = (max_length + 2)
-                    worksheet.column_dimensions[column].width = adjusted_width
+            -- Fecha último ascenso con prioridad
+            COALESCE(
+                (SELECT ha.fecha_ascenso 
+                 FROM historial_ascensos ha 
+                 WHERE ha.funcionario_id = f.id 
+                 ORDER BY ha.fecha_ascenso DESC 
+                 LIMIT 1),
+                f.fecha_ultimo_ascenso
+            ) as fecha_ultimo_ascenso_final,
             
-            # Hoja 2: Solo los que cumplen todos los requisitos
-            if listas["cumple_todos_requisitos"]:
-                datos_elegibles = []
-                for funcionario in listas["cumple_todos_requisitos"]:
-                    datos_elegibles.append({
-                        'Cédula': funcionario.cedula,
-                        'Nombre Completo': funcionario.nombre_completo,
-                        'Sexo': funcionario.sexo,
-                        'Edad': funcionario.edad,
-                        'Nivel Académico': funcionario.nivel_academico,
-                        'Tiempo en Rango (años)': funcionario.tiempo_en_rango,
-                        'Tiempo de Servicio (años)': funcionario.tiempo_de_servicio,
-                        'Total Puntos': funcionario.total_puntos,
-                        'Rango Actual': funcionario.rango_actual,
-                        'Rango a Aplicar': funcionario.rango_a_aplicar,
-                        'Condición Actual': funcionario.estado_actual,
-                        'Detalles Expedientes Cerrados Recientes': funcionario.detalles_expedientes_cerrados_recientes,
-                        'Detalles Expedientes Abiertos': funcionario.detalles_expedientes_abiertos
-                    })
-                
-                df_elegibles = pd.DataFrame(datos_elegibles)
-                df_elegibles.to_excel(writer, sheet_name='Elegibles Completos', index=False)
-                
-                # Agregar autofiltro y ajustar ancho columnas
-                worksheet = writer.sheets['Elegibles Completos']
-                worksheet.auto_filter.ref = worksheet.dimensions
-                for col_cells in worksheet.columns:
-                    max_length = 0
-                    column = col_cells[0].column_letter
-                    for cell in col_cells:
-                        try:
-                            if cell.value:
-                                max_length = max(max_length, len(str(cell.value)))
-                        except:
-                            pass
-                    adjusted_width = (max_length + 2)
-                    worksheet.column_dimensions[column].width = adjusted_width
+            -- Nivel académico con prioridad
+            COALESCE(
+                (SELECT aa.grado_instruccion 
+                 FROM antecedentes_academicos aa 
+                 WHERE aa.funcionario_id = f.id 
+                 ORDER BY aa.fecha_graduacion DESC 
+                 LIMIT 1),
+                f.grado_instruccion
+            ) as nivel_academico_final,
             
-            # Hoja 3: Solo los que cumplen menos académicos
-            if listas["cumple_menos_academicos"]:
-                datos_menos_academicos = []
-                for funcionario in listas["cumple_menos_academicos"]:
-                    datos_menos_academicos.append({
-                        'Cédula': funcionario.cedula,
-                        'Nombre Completo': funcionario.nombre_completo,
-                        'Sexo': funcionario.sexo,
-                        'Edad': funcionario.edad,
-                        'Nivel Académico': funcionario.nivel_academico,
-                        'Tiempo en Rango (años)': funcionario.tiempo_en_rango,
-                        'Tiempo de Servicio (años)': funcionario.tiempo_de_servicio,
-                        'Total Puntos': funcionario.total_puntos,
-                        'Rango Actual': funcionario.rango_actual,
-                        'Rango a Aplicar': funcionario.rango_a_aplicar,
-                        'Observaciones': funcionario.observaciones
-                    })
+            -- Observaciones del último ascenso
+            (SELECT ha.observaciones 
+             FROM historial_ascensos ha 
+             WHERE ha.funcionario_id = f.id 
+             ORDER BY ha.fecha_ascenso DESC 
+             LIMIT 1) as observaciones_ascenso,
+            
+            -- Tiempo de servicio adicional
+            COALESCE(
+                json_agg(
+                    DISTINCT jsonb_build_object(
+                        'institucion', ts.institucion,
+                        'fecha_ingreso', ts.fecha_ingreso,
+                        'fecha_egreso', ts.fecha_egreso,
+                        'cargo', ts.cargo
+                    )
+                ) FILTER (WHERE ts.id IS NOT NULL), 
+                '[]'::json
+            ) as tiempos_servicio
+            
+        FROM funcionarios f
+        LEFT JOIN tiempo_servicio ts ON f.id = ts.funcionario_id
+        WHERE f.id IN ({placeholders})
+        GROUP BY f.id
+        ORDER BY f.id
+        """
+        
+        cursor.execute(query, funcionario_ids)
+        datos_funcionarios = {row['id']: dict(row) for row in cursor.fetchall()}
+        
+        cursor.close()
+        conn.close()
+        
+        # Procesar cada funcionario del lote
+        for funcionario in lote_funcionarios:
+            try:
+                datos_completos = datos_funcionarios.get(funcionario.id, {})
                 
-                df_menos_academicos = pd.DataFrame(datos_menos_academicos)
-                df_menos_academicos.to_excel(writer, sheet_name='Elegibles Menos Académicos', index=False)
+                if not datos_completos:
+                    # Usar datos básicos del funcionario procesado
+                    datos_completos = {
+                        'nombre_completo': funcionario.nombre_completo,
+                        'cedula': funcionario.cedula,
+                        'dependencia_final': 'No posee',
+                        'nivel_academico_final': funcionario.nivel_academico,
+                        'cohorte': 'Sin registrar',
+                        'fecha_ingreso': None,
+                        'fecha_ultimo_ascenso_final': None,
+                        'observaciones_ascenso': funcionario.observaciones,
+                        'nro_celular': None,
+                        'nro_local': None,
+                        'nro_otro': None,
+                        'imagen': None,
+                        'rango_final': funcionario.rango_actual,
+                        'tiempos_servicio': []
+                    }
                 
-                # Agregar autofiltro y ajustar ancho columnas
-                worksheet = writer.sheets['Elegibles Menos Académicos']
-                worksheet.auto_filter.ref = worksheet.dimensions
-                for col_cells in worksheet.columns:
-                    max_length = 0
-                    column = col_cells[0].column_letter
-                    for cell in col_cells:
-                        try:
-                            if cell.value:
-                                max_length = max(max_length, len(str(cell.value)))
-                        except:
-                            pass
-                    adjusted_width = (max_length + 2)
-                    worksheet.column_dimensions[column].width = adjusted_width
+                # Procesar tiempos de servicio
+                tiempos_servicio = datos_completos.get('tiempos_servicio', [])
+                if isinstance(tiempos_servicio, str):
+                    try:
+                        tiempos_servicio = json.loads(tiempos_servicio)
+                    except:
+                        tiempos_servicio = []
+                
+                # Calcular antigüedad policial
+                antiguedad_policial = calcular_antiguedad_policial(
+                    datos_completos.get('fecha_ingreso'),
+                    tiempos_servicio,
+                    fecha_corte
+                )
+                
+                # Preparar teléfono
+                telefono = datos_completos.get('nro_celular') or datos_completos.get('nro_local') or datos_completos.get('nro_otro') or 'Sin registrar'
+                
+                # Preparar fecha último ascenso
+                fecha_ultimo_ascenso = datos_completos.get('fecha_ultimo_ascenso_final')
+                if fecha_ultimo_ascenso:
+                    try:
+                        fecha_ultimo_ascenso_str = fecha_ultimo_ascenso.strftime('%d-%m-%Y') if isinstance(fecha_ultimo_ascenso, date) else str(fecha_ultimo_ascenso)
+                    except:
+                        fecha_ultimo_ascenso_str = "NO POSEE"
+                else:
+                    fecha_ultimo_ascenso_str = "NO POSEE"
+                
+                # Preparar fecha ingreso
+                fecha_ingreso = datos_completos.get('fecha_ingreso')
+                try:
+                    fecha_ingreso_str = fecha_ingreso.strftime('%d-%m-%Y') if fecha_ingreso else 'Sin registrar'
+                except:
+                    fecha_ingreso_str = 'Sin registrar'
+                
+                # Crear datos del funcionario para la columna B (uno debajo del otro)
+                datos_funcionario = [
+                    datos_completos.get('nombre_completo', ''),
+                    datos_completos.get('cedula', ''),
+                    str(funcionario.edad or 0),
+                    datos_completos.get('rango_final', '') or funcionario.rango_actual,
+                    telefono,
+                    datos_completos.get('dependencia_final', '') or 'Sin registrar',
+                    datos_completos.get('nivel_academico_final', '') or funcionario.nivel_academico,
+                    datos_completos.get('cohorte', '') or 'Sin registrar',
+                    fecha_ingreso_str,
+                    fecha_ultimo_ascenso_str,
+                    antiguedad_policial
+                ]
+                
+                # Crear fila de datos con el nuevo formato
+                fila_data = {
+                    'funcionario_id': funcionario.id,
+                    'datos_funcionario': datos_funcionario,  # Lista de datos para la columna B
+                    'rango_a_aplicar': funcionario.rango_a_aplicar,  # Rango al que aplica para ascender
+                    'observaciones': "",  # En blanco para que el evaluador escriba
+                    'requisitos_no_cumplidos': funcionario.observaciones,  # Lo que antes iba en observaciones
+                    'apto': "",  # Dropdown
+                    'no_apto': "",  # Dropdown
+                    'tiene_imagen': bool(datos_completos.get('imagen')),
+                    'imagen_nombre': datos_completos.get('imagen', '')
+                }
+                
+                filas_procesadas.append(fila_data)
+                
+            except Exception as row_error:
+                logger.error(f"[EXCEL_LOTE_{lote_id}] Error procesando funcionario {funcionario.cedula}: {row_error}")
+                continue
+        
+        processing_time = time.time() - start_time
+        logger.info(f"[EXCEL_LOTE_{lote_id}] Completado en {processing_time:.2f}s - {len(filas_procesadas)} filas procesadas")
+        
+        return filas_procesadas
+        
+    except Exception as e:
+        logger.error(f"[EXCEL_LOTE_{lote_id}] Error en procesamiento: {e}")
+        return []
+
+def generar_excel_ascensos(listas: Dict[str, List[FuncionarioAscenso]], fecha_corte: date) -> str:
+    """Genera un archivo Excel con las listas de ascenso usando procesamiento multihilo optimizado"""
+    
+    try:
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+        from openpyxl.worksheet.datavalidation import DataValidation
+        from PIL import Image as PILImage
+        import tempfile
+        import os
+        
+        logger.info("Iniciando generación de archivo Excel con procesamiento multihilo...")
+        
+        # Contar total de funcionarios a procesar
+        total_funcionarios = sum(len(funcionarios) for funcionarios in listas.values())
+        logger.info(f"Total de funcionarios a incluir en Excel: {total_funcionarios}")
+        
+        # Crear lista ordenada de funcionarios respetando el orden de mérito
+        todos_funcionarios = []
+        
+        # Orden de prioridad según mérito policial
+        orden_listas = [
+            "cumple_todos_requisitos",
+            "falta_nivel_academico", 
+            "falta_tiempo_rango",
+            "falta_tiempo_servicio",
+            "expediente_cerrado_reciente",
+            "expediente_abierto",
+            "condicion_actual_invalida"
+        ]
+        
+        for categoria in orden_listas:
+            if categoria in listas:
+                funcionarios_categoria = listas[categoria]
+                logger.info(f"Agregando {len(funcionarios_categoria)} funcionarios de categoría: {categoria}")
+                todos_funcionarios.extend(funcionarios_categoria)
+        
+        logger.info(f"Procesando {len(todos_funcionarios)} funcionarios en lotes de {BATCH_SIZE}")
+        
+        # Dividir funcionarios en lotes manteniendo el orden
+        lotes = []
+        for i in range(0, len(todos_funcionarios), BATCH_SIZE):
+            lote = todos_funcionarios[i:i + BATCH_SIZE]
+            lotes.append(lote)
+        
+        # Procesar lotes en paralelo PERO manteniendo el orden de mérito
+        todas_filas = []
+        start_time = time.time()
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Enviar lotes a los hilos con índice para mantener orden
+            futures = []
+            for lote_id, lote in enumerate(lotes):
+                future = executor.submit(procesar_lote_funcionarios_excel, lote, fecha_corte, lote_id)
+                futures.append((lote_id, future))
+            
+            # Recopilar resultados EN ORDEN para mantener el mérito policial
+            resultados_ordenados = [None] * len(lotes)  # Array para mantener orden
+            
+            for lote_id, future in futures:
+                try:
+                    filas_lote = future.result()
+                    resultados_ordenados[lote_id] = filas_lote  # Guardar en posición correcta
+                    logger.info(f"[EXCEL_MULTIHILO] Lote {lote_id} completado - {len(filas_lote)} filas")
+                except Exception as e:
+                    logger.error(f"[EXCEL_MULTIHILO] Error en lote {lote_id}: {e}")
+                    resultados_ordenados[lote_id] = []  # Lista vacía en caso de error
+            
+            # Concatenar resultados en el orden correcto de mérito
+            for resultado_lote in resultados_ordenados:
+                if resultado_lote:  # Solo agregar si no es None o vacío
+                    todas_filas.extend(resultado_lote)
+        
+        processing_time = time.time() - start_time
+        logger.info(f"[EXCEL_MULTIHILO] Procesamiento completado en {processing_time:.2f}s")
+        logger.info(f"[EXCEL_MULTIHILO] Total filas procesadas: {len(todas_filas)}")
+        
+        # Crear workbook
+        logger.info("Creando archivo Excel...")
+        output = io.BytesIO()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Listado de Ascensos"
+        
+        # Crear hoja de instrucciones separada
+        ws_instrucciones = wb.create_sheet("Instrucciones")
+        
+        # Definir estilos
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        # Configurar hoja de instrucciones
+        logger.info("Creando hoja de instrucciones...")
+        ws_instrucciones.column_dimensions['A'].width = 30
+        ws_instrucciones.column_dimensions['B'].width = 80
+        
+        # Título de instrucciones
+        title_cell = ws_instrucciones.cell(row=1, column=1, value="INSTRUCCIONES DE USO - LISTADO DE ASCENSOS")
+        title_cell.font = Font(bold=True, size=16, color="FFFFFF")
+        title_cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws_instrucciones.merge_cells('A1:B1')
+        ws_instrucciones.row_dimensions[1].height = 30
+        
+        # Instrucciones detalladas
+        instrucciones_detalladas = [
+            ("", ""),  # Fila vacía
+            ("COLUMNA", "DESCRIPCIÓN"),
+            ("Foto", "Muestra la fotografía del funcionario si está disponible"),
+            ("Datos del Funcionario", "Contiene toda la información personal y profesional del funcionario:\n• Nombre Completo\n• Cédula\n• Edad\n• Rango Actual\n• Teléfono\n• Dependencia\n• Nivel Académico\n• Cohorte\n• Fecha Ingreso\n• Fecha Último Ascenso\n• Antigüedad en Función Policial"),
+            ("Observaciones", "CAMPO PARA LLENAR: Escriba aquí sus observaciones sobre la evaluación del funcionario"),
+            ("Requisitos No Cumplidos", "Muestra automáticamente los requisitos que no cumple el funcionario según los criterios de ascenso"),
+            ("Apto", "CAMPO PARA LLENAR: Marque 'Sí' si el funcionario ES APTO para ascenso"),
+            ("No Apto", "CAMPO PARA LLENAR: Marque 'Sí' si el funcionario NO ES APTO para ascenso"),
+            ("", ""),  # Fila vacía
+            ("IMPORTANTE", "NOTAS IMPORTANTES"),
+            ("Orden de Mérito", "Los funcionarios están ordenados por orden de mérito policial:\n1. Cumple todos los requisitos\n2. Solo falta nivel académico\n3. Solo falta tiempo en rango\n4. Solo falta tiempo de servicio\n5. Expediente cerrado reciente\n6. Expediente abierto\n7. Condición actual inválida"),
+            ("Evaluación", "Solo marque UNA opción: 'Apto' O 'No Apto', nunca ambas"),
+            ("Navegación", "Use los filtros de Excel para navegar por los datos sin alterar el orden de mérito"),
+            ("Guardado", "Guarde el archivo frecuentemente para no perder su trabajo")
+        ]
+        
+        for row_idx, (columna, descripcion) in enumerate(instrucciones_detalladas, 2):
+            if columna == "COLUMNA" or columna == "IMPORTANTE":
+                # Encabezados de sección
+                cell_a = ws_instrucciones.cell(row=row_idx, column=1, value=columna)
+                cell_b = ws_instrucciones.cell(row=row_idx, column=2, value=descripcion)
+                cell_a.font = Font(bold=True, color="FFFFFF")
+                cell_b.font = Font(bold=True, color="FFFFFF")
+                cell_a.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                cell_b.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            elif columna == "":
+                # Filas vacías
+                continue
+            else:
+                # Contenido normal
+                cell_a = ws_instrucciones.cell(row=row_idx, column=1, value=columna)
+                cell_b = ws_instrucciones.cell(row=row_idx, column=2, value=descripcion)
+                cell_a.font = Font(bold=True)
+                cell_b.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            
+            # Aplicar bordes
+            cell_a.border = border
+            cell_b.border = border
+            
+            # Ajustar altura de fila para texto largo
+            if "\n" in descripcion:
+                ws_instrucciones.row_dimensions[row_idx].height = 80
+            else:
+                ws_instrucciones.row_dimensions[row_idx].height = 25
+        
+        # Configurar hoja principal
+        logger.info("Configurando hoja principal...")
+        
+        # Encabezados de columnas con el nuevo formato
+        headers = [
+            "Foto", 
+            "Datos del Funcionario", 
+            "Observaciones", 
+            "Requisitos No Cumplidos", 
+            "Apto", 
+            "No Apto"
+        ]
+        
+        # Escribir encabezados
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Ajustar ancho de columnas
+        column_widths = [15, 50, 40, 40, 10, 10]  # Foto, Datos, Observaciones, Requisitos, Apto, No Apto
+        for col, width in enumerate(column_widths, 1):
+            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
+        
+        # Configurar altura de filas para las fotos
+        ws.row_dimensions[1].height = 30  # Header
+        
+        # Escribir datos de las filas
+        logger.info("Escribiendo datos al Excel...")
+        current_row = 2  # Empezar en la fila 2 directamente después del encabezado
+        
+        # Etiquetas para los datos del funcionario
+        etiquetas_datos = [
+            "Nombre Completo:",
+            "Cédula:",
+            "Edad:",
+            "Rango Actual:",
+            "Teléfono:",
+            "Dependencia:",
+            "Nivel Académico:",
+            "Cohorte:",
+            "Fecha Ingreso:",
+            "Fecha Último Ascenso:",
+            "Antigüedad en Función Policial:"
+        ]
+        
+        for fila_data in todas_filas:
+            try:
+                # Configurar altura de fila (más alta para acomodar todos los datos)
+                if fila_data.get('tiene_imagen'):
+                    ws.row_dimensions[current_row].height = 200  # Altura mayor para fotos y datos
+                else:
+                    ws.row_dimensions[current_row].height = 180  # Altura para datos sin foto
+                
+                # Columna A: Foto
+                if fila_data.get('tiene_imagen'):
+                    try:
+                        imagen_nombre = fila_data.get('imagen_nombre', '')
+                        if imagen_nombre:
+                            # Construir ruta de la imagen según el patrón encontrado
+                            # El campo imagen contiene algo como: "98366_12115547/fotos/687d8a72b5615.png"
+                            # Y debe buscarse en: storage/app/public/fotos_funcionarios/fotos/98366_12115547/fotos/687d8a72b5615.png
+                            
+                            # Rutas alternativas a intentar basadas en la estructura real
+                            # El campo imagen contiene: "98366_12115547/fotos/687d8a72b5615.png"
+                            # Debe buscarse en: storage/app/public/fotos_funcionarios/{imagen_nombre}
+                            rutas_alternativas = [
+                                f"storage/app/public/fotos_funcionarios/{imagen_nombre}",      # Ruta principal según especificación
+                                f"storage/app/public/fotos_funcionarios/fotos/{imagen_nombre}",  # Ruta alternativa 1
+                                f"public/storage/fotos_funcionarios/{imagen_nombre}",         # Ruta alternativa 2
+                                f"public/storage/fotos_funcionarios/fotos/{imagen_nombre}",    # Ruta alternativa 3
+                                str(FOTOS_BASE_DIR / imagen_nombre)                           # Ruta con Path
+                            ]
+                            
+                            imagen_encontrada = False
+                            for ruta in rutas_alternativas:
+                                if os.path.exists(ruta):
+                                    imagen_path = ruta
+                                    imagen_encontrada = True
+                                    logger.debug(f"Imagen encontrada en: {ruta}")
+                                    break
+                            
+                            if imagen_encontrada:
+                                # Redimensionar imagen
+                                with PILImage.open(imagen_path) as img:
+                                    # Redimensionar manteniendo proporción
+                                    img.thumbnail((120, 160), PILImage.Resampling.LANCZOS)
+                                    
+                                    # Crear archivo temporal
+                                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                                        img.save(temp_file.name, 'PNG')
+                                        
+                                        # Agregar imagen a Excel
+                                        excel_img = Image(temp_file.name)
+                                        excel_img.width = 100
+                                        excel_img.height = 140
+                                        
+                                        # Posicionar imagen en la celda
+                                        cell_ref = f"A{current_row}"
+                                        ws.add_image(excel_img, cell_ref)
+                                        
+                                        # Limpiar archivo temporal
+                                        os.unlink(temp_file.name)
+                            else:
+                                # Si no se encuentra la imagen, escribir texto con información de debug
+                                logger.warning(f"Imagen no encontrada: {imagen_nombre}. Rutas intentadas: {rutas_alternativas}")
+                                cell = ws.cell(row=current_row, column=1, value="Foto no encontrada")
+                                cell.border = border
+                                cell.alignment = Alignment(horizontal="center", vertical="center")
+                    except Exception as img_error:
+                        logger.warning(f"Error procesando imagen para funcionario ID {fila_data['funcionario_id']}: {img_error}")
+                        # Escribir texto si hay error con la imagen
+                        cell = ws.cell(row=current_row, column=1, value="Error cargando foto")
+                        cell.border = border
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    # Sin imagen
+                    cell = ws.cell(row=current_row, column=1, value="Sin foto")
+                    cell.border = border
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+                # Columna B: Datos del Funcionario (uno debajo del otro) + Rango a aplicar
+                datos_texto = []
+                for i, (etiqueta, valor) in enumerate(zip(etiquetas_datos, fila_data['datos_funcionario'])):
+                    datos_texto.append(f"{etiqueta} {valor}")
+                
+                # Agregar el rango a aplicar al final como parte del texto normal
+                rango_a_aplicar = fila_data.get('rango_a_aplicar', 'N/A')
+                datos_texto.append(f"Rango a Aplicar: {rango_a_aplicar}")
+                
+                datos_completos = "\n".join(datos_texto)
+                cell = ws.cell(row=current_row, column=2, value=datos_completos)
+                cell.border = border
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                
+                # Columna C: Observaciones (en blanco para que el evaluador escriba)
+                cell = ws.cell(row=current_row, column=3, value=fila_data['observaciones'])
+                cell.border = border
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                
+                # Columna D: Requisitos No Cumplidos
+                cell = ws.cell(row=current_row, column=4, value=fila_data['requisitos_no_cumplidos'])
+                cell.border = border
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                
+                # Columna E: Apto
+                cell = ws.cell(row=current_row, column=5, value=fila_data['apto'])
+                cell.border = border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+                # Columna F: No Apto
+                cell = ws.cell(row=current_row, column=6, value=fila_data['no_apto'])
+                cell.border = border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+                current_row += 1
+                
+            except Exception as row_error:
+                logger.error(f"Error escribiendo fila: {row_error}")
+                continue
+        
+        logger.info(f"Completado escritura de {current_row - 2} filas de datos")
+        
+        # Agregar validación de datos para las columnas Apto/No Apto
+        if current_row > 2:  # Solo si hay datos
+            try:
+                logger.info("Agregando validaciones de datos...")
+                
+                apto_validation = DataValidation(type="list", formula1='"Sí,No"', allow_blank=True)
+                apto_validation.error = 'Seleccione Sí o No para indicar si es apto'
+                apto_validation.errorTitle = 'Entrada inválida'
+                
+                # Aplicar validación a la columna E (Apto) - empezar desde fila 2
+                ws.add_data_validation(apto_validation)
+                apto_validation.add(f"E2:E{current_row-1}")
+                
+                no_apto_validation = DataValidation(type="list", formula1='"Sí,No"', allow_blank=True)
+                no_apto_validation.error = 'Seleccione Sí o No para indicar si NO es apto'
+                no_apto_validation.errorTitle = 'Entrada inválida'
+                
+                ws.add_data_validation(no_apto_validation)
+                no_apto_validation.add(f"F2:F{current_row-1}")
+                
+                # Congelar primera fila (solo encabezado)
+                ws.freeze_panes = "A2"
+                
+                # Agregar autofiltro desde la fila 1
+                ws.auto_filter.ref = f"A1:F{current_row-1}"
+                
+                logger.info("Validaciones agregadas exitosamente")
+            except Exception as validation_error:
+                logger.warning(f"Error agregando validaciones: {validation_error}")
+        
+        logger.info("Guardando archivo Excel en buffer...")
+        
+        # Guardar en buffer
+        wb.save(output)
         
         # Obtener el contenido del buffer
         output.seek(0)
         excel_content = output.getvalue()
         
+        logger.info(f"Excel generado exitosamente. Tamaño: {len(excel_content)} bytes")
+        
         # Codificar en base64 para envío
         excel_base64 = base64.b64encode(excel_content).decode('utf-8')
+        
+        logger.info("Excel codificado en base64 exitosamente")
         
         return excel_base64
         
@@ -861,7 +1518,9 @@ async def generar_listado_ascenso(request: ListadoAscensoRequest) -> ListadoAsce
         estadisticas = {
             "total_evaluados": len(funcionarios_procesados),
             "cumple_todos_requisitos": len(listas["cumple_todos_requisitos"]),
-            "cumple_menos_academicos": len(listas["cumple_menos_academicos"]),
+            "falta_nivel_academico": len(listas["falta_nivel_academico"]),
+            "falta_tiempo_rango": len(listas["falta_tiempo_rango"]),
+            "falta_tiempo_servicio": len(listas["falta_tiempo_servicio"]),
             "expediente_cerrado_reciente": len(listas["expediente_cerrado_reciente"]),
             "expediente_abierto": len(listas["expediente_abierto"]),
             "condicion_actual_invalida": len(listas["condicion_actual_invalida"])
@@ -1142,3 +1801,150 @@ async def exportar_excel_ascensos(fecha_corte: date):
     except Exception as e:
         logger.error(f"Error exportando Excel: {e}")
         raise HTTPException(status_code=500, detail=f"Error exportando archivo: {str(e)}")
+
+@router.post("/ascenso/cargar-excel-evaluado")
+async def cargar_excel_evaluado(file: UploadFile = File(...)):
+    """
+    Carga un archivo Excel con las evaluaciones de ascenso completadas y actualiza el historial de ascensos.
+    """
+    try:
+        from fastapi import UploadFile, File
+        import tempfile
+        import os
+        
+        logger.info(f"Cargando archivo Excel evaluado: {file.filename}")
+        
+        # Validar que sea un archivo Excel
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="Solo se permiten archivos Excel (.xlsx, .xls)")
+        
+        # Guardar archivo temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_path = temp_file.name
+        
+        try:
+            # Leer el Excel
+            df = pd.read_excel(temp_path)
+            
+            # Validar columnas requeridas
+            required_columns = ['Cédula', 'Apto', 'No Apto']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Faltan las siguientes columnas en el Excel: {', '.join(missing_columns)}"
+                )
+            
+            # Procesar las evaluaciones
+            evaluaciones_procesadas = []
+            evaluaciones_con_error = []
+            
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            for index, row in df.iterrows():
+                try:
+                    cedula = str(row['Cédula']).strip()
+                    apto = str(row['Apto']).strip().upper() if pd.notna(row['Apto']) else ''
+                    no_apto = str(row['No Apto']).strip().upper() if pd.notna(row['No Apto']) else ''
+                    
+                    # Validar que solo una opción esté marcada
+                    if apto == 'SÍ' and no_apto == 'SÍ':
+                        evaluaciones_con_error.append({
+                            'fila': index + 2,
+                            'cedula': cedula,
+                            'error': 'No puede estar marcado como Apto y No Apto al mismo tiempo'
+                        })
+                        continue
+                    
+                    if apto != 'SÍ' and no_apto != 'SÍ':
+                        # Saltar filas sin evaluación
+                        continue
+                    
+                    # Determinar el estado
+                    estado_evaluacion = 'APTO' if apto == 'SÍ' else 'NO_APTO'
+                    
+                    # Buscar funcionario por cédula
+                    cursor.execute("SELECT id FROM funcionarios WHERE cedula = %s", (cedula,))
+                    funcionario = cursor.fetchone()
+                    
+                    if not funcionario:
+                        evaluaciones_con_error.append({
+                            'fila': index + 2,
+                            'cedula': cedula,
+                            'error': 'Funcionario no encontrado'
+                        })
+                        continue
+                    
+                    # Insertar o actualizar en historial de ascensos
+                    insert_query = """
+                    INSERT INTO historial_ascensos 
+                    (funcionario_id, rango_anterior, rango_nuevo, tipo_ascenso, fecha_ascenso, decision, estado, observaciones)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """
+                    
+                    # Obtener rango actual del funcionario
+                    cursor.execute("SELECT rango_actual FROM funcionarios WHERE id = %s", (funcionario['id'],))
+                    funcionario_data = cursor.fetchone()
+                    rango_actual = funcionario_data['rango_actual'] if funcionario_data else 'N/A'
+                    
+                    # Determinar rango siguiente
+                    criterios = CRITERIOS_ASCENSO.get(rango_actual.upper(), {})
+                    rango_siguiente = criterios.get('siguienteRango', 'N/A')
+                    
+                    cursor.execute(insert_query, (
+                        funcionario['id'],
+                        rango_actual,
+                        rango_siguiente if estado_evaluacion == 'APTO' else rango_actual,
+                        'EVALUACION_ASCENSO',
+                        datetime.now().date(),
+                        f'Evaluación de ascenso: {estado_evaluacion}',
+                        'APROBADO' if estado_evaluacion == 'APTO' else 'RECHAZADO',
+                        f'Evaluación cargada desde Excel el {datetime.now().strftime("%d-%m-%Y")}'
+                    ))
+                    
+                    evaluaciones_procesadas.append({
+                        'cedula': cedula,
+                        'estado': estado_evaluacion,
+                        'rango_actual': rango_actual,
+                        'rango_siguiente': rango_siguiente if estado_evaluacion == 'APTO' else rango_actual
+                    })
+                    
+                except Exception as row_error:
+                    evaluaciones_con_error.append({
+                        'fila': index + 2,
+                        'cedula': cedula if 'cedula' in locals() else 'N/A',
+                        'error': str(row_error)
+                    })
+                    continue
+            
+            # Confirmar transacción
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"Procesadas {len(evaluaciones_procesadas)} evaluaciones exitosamente")
+            if evaluaciones_con_error:
+                logger.warning(f"Se encontraron {len(evaluaciones_con_error)} errores durante el procesamiento")
+            
+            return {
+                "success": True,
+                "message": f"Archivo procesado exitosamente. {len(evaluaciones_procesadas)} evaluaciones cargadas.",
+                "evaluaciones_procesadas": len(evaluaciones_procesadas),
+                "evaluaciones_con_error": len(evaluaciones_con_error),
+                "errores": evaluaciones_con_error[:10] if evaluaciones_con_error else [],  # Mostrar solo los primeros 10 errores
+                "detalles_procesadas": evaluaciones_procesadas[:5]  # Mostrar solo las primeras 5 para referencia
+            }
+            
+        finally:
+            # Limpiar archivo temporal
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cargando Excel evaluado: {e}")
+        raise HTTPException(status_code=500, detail=f"Error procesando archivo: {str(e)}")

@@ -11,7 +11,7 @@ venv/
 env/
 
 # Archivos de configuración sensibles
-.env.example
+.env
 
 # Archivos de Office, Excel, CSV, TXT
 *.doc
